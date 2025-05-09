@@ -271,7 +271,16 @@ class MainWindow(QMainWindow):
         #self.thumbnail_list_widget.setViewMode(QListWidget.ViewMode.IconMode) # Ou ListMode
         self.thumbnail_list_widget.setViewMode(QListWidget.ViewMode.ListMode) # TEST
         self.thumbnail_list_widget.setFlow(QListWidget.Flow.TopToBottom)
-        self.thumbnail_list_widget.setMovement(QListWidget.Movement.Static) # Empêche le drag & drop interne
+        #self.thumbnail_list_widget.setMovement(QListWidget.Movement.Static) # Empêche le drag & drop interne
+
+         # Activer le Drag & Drop
+        self.thumbnail_list_widget.setDragEnabled(True)
+        self.thumbnail_list_widget.setAcceptDrops(True)
+        self.thumbnail_list_widget.setDropIndicatorShown(True)
+        # QListWidget.InternalMove permet de réorganiser les items à l'intérieur du même widget
+        self.thumbnail_list_widget.setDefaultDropAction(Qt.DropAction.MoveAction) # Indique que c'est un déplacement
+        self.thumbnail_list_widget.setMovement(QListWidget.Movement.Snap) # Ou Free, Snap est bien pour les listes
+
         self.thumbnail_list_widget.setMinimumWidth(THUMBNAIL_SIZE + 40) # AJOUTER : taille icône + marges
         self.thumbnail_list_widget.setMinimumHeight(300) # AJOUTER : pour voir plusieurs items
         self.thumbnail_dock.setWidget(self.thumbnail_list_widget)
@@ -391,10 +400,79 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.thumbnail_list_widget.itemClicked.connect(self._on_thumbnail_clicked)
+        # Connecter au signal rowsMoved du modèle du QListWidget
+        self.thumbnail_list_widget.model().rowsMoved.connect(self._on_thumbnail_order_changed)
+
         self.precise_mode_checkbox.stateChanged.connect(self._on_precise_mode_changed)
         self.rotation_spinbox.valueChanged.connect(self._on_rotation_changed)
         self.scale_spinbox.valueChanged.connect(self._on_scale_changed)
-        self.scene.selectionChanged.connect(self._on_scene_selection_changed) # << NOUVELLE CONNEXION
+        self.scene.selectionChanged.connect(self._on_scene_selection_changed)
+
+    # Dans MainWindow
+    def _on_thumbnail_order_changed(self, parent_index, start_row, end_row, destination_index, dest_row):
+        """
+        Appelé lorsque l'ordre des items dans la liste des miniatures est modifié
+        par drag & drop.
+        Met à jour le Z-order des QGraphicsPixmapItem correspondants.
+        """
+        print(f"[DEBUG] _on_thumbnail_order_changed: Rows moved from {start_row}-{end_row} to {dest_row}")
+        self.update_z_order_from_thumbnails()
+
+    def update_z_order_from_thumbnails(self):
+        """
+        Met à jour le Z-order des images sur la scène en fonction de l'ordre
+        actuel des items dans la liste des miniatures.
+        L'item en haut de la liste (index 0) est le plus en arrière (Z le plus bas).
+        L'item en bas de la liste est le plus en avant (Z le plus haut).
+        """
+        if not self.image_items: # S'il n'y a pas d'image_items (qui sont les DraggableResizablePixmapItem)
+            return
+
+        num_thumbnails = self.thumbnail_list_widget.count()
+        if num_thumbnails == 0:
+            return
+
+        print("[DEBUG] update_z_order_from_thumbnails: Mise à jour du Z-order...")
+
+        # Créer une liste temporaire des graphic_items dans le nouvel ordre des miniatures
+        ordered_graphic_items = []
+        for i in range(num_thumbnails):
+            list_item = self.thumbnail_list_widget.item(i)
+            if list_item:
+                graphic_item = list_item.data(Qt.ItemDataRole.UserRole)
+                if graphic_item and isinstance(graphic_item, DraggableResizablePixmapItem):
+                    ordered_graphic_items.append(graphic_item)
+                else:
+                    print(f"[AVERTISSEMENT] update_z_order_from_thumbnails: Item de liste à l'index {i} n'a pas de graphic_item valide.")
+            else:
+                print(f"[AVERTISSEMENT] update_z_order_from_thumbnails: Impossible de récupérer l'item de liste à l'index {i}.")
+
+
+        # Assigner les Z-values. Z=0.0 est l'arrière-plan par défaut.
+        # On peut commencer à Z=1.0 pour nos items.
+        # Il est important que les Z-values soient distincts si on veut un ordre strict.
+        for i, graphic_item in enumerate(ordered_graphic_items):
+            # i=0 est l'item le plus en haut de la liste (le plus en arrière)
+            # i=len-1 est l'item le plus en bas (le plus en avant)
+            # QGraphicsItem avec Z plus grand est dessiné par-dessus ceux avec Z plus petit.
+            # Donc, l'item en bas de la liste (dernier dans ordered_graphic_items) doit avoir le Z le plus élevé.
+            # L'item en haut de la liste (premier dans ordered_graphic_items) doit avoir le Z le plus bas.
+            new_z_value = float(i + 1) # Z = 1.0, 2.0, 3.0 ...
+            graphic_item.setZValue(new_z_value)
+            print(f"[DEBUG] update_z_order_from_thumbnails: Item '{graphic_item.filename}' mis à Z-value {new_z_value}")
+
+        # S'assurer que l'item actif (s'il y en a un) reste visuellement "sélectionné"
+        # et potentiellement au-dessus des autres temporairement lors d'une interaction directe.
+        # La logique actuelle de _set_active_item et mousePressEvent sur l'item
+        # gère déjà le fait de mettre l'item actif au premier plan lors de l'interaction.
+        # Cette fonction `update_z_order_from_thumbnails` définit l'ordre de base.
+        # Si un item est actif, sa logique de mise au premier plan temporaire prévaudra
+        # sur le Z-value de base jusqu'à ce qu'il soit désactivé ou qu'un autre soit activé.
+
+        self.scene.update() # Forcer une mise à jour de la scène si nécessaire
+
+
+
 
     def update_controls_state(self):
         """ Met à jour l'état (activé/désactivé) des contrôles en fonction de l'image active. """
@@ -525,10 +603,11 @@ class MainWindow(QMainWindow):
                     import traceback
                     traceback.print_exc() # Imprime la trace complète de l'exception
 
-            if successful_imports > 0: # self.image_items:
+            if successful_imports > 0:
                 print(f"[DEBUG] import_images: {successful_imports} image(s) importée(s) avec succès. Sélection de la première.")
-                self._set_active_item(self.image_items[0])
+                self._set_active_item(self.image_items[0]) # image_items[0] est le premier Draggable...
                 self.thumbnail_list_widget.setCurrentRow(0)
+                self.update_z_order_from_thumbnails() # << AJOUTER CET APPEL ICI
             else:
                 print("[DEBUG] import_images: Aucune image n'a été importée avec succès.")
 
