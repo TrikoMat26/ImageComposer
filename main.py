@@ -110,64 +110,78 @@ class DraggableResizablePixmapItem(QGraphicsPixmapItem):
 
     # Dans la classe DraggableResizablePixmapItem
 
-    def mouseMoveEvent(self, event: 'QGraphicsSceneMouseEvent'): # 'QGraphicsSceneMouseEvent' entre guillemets pour forward declaration si besoin
+    def mouseMoveEvent(self, event: 'QGraphicsSceneMouseEvent'):
         if self.current_manipulation_mode and (event.buttons() & Qt.MouseButton.LeftButton):
             current_mouse_pos = event.scenePos()
-            # delta_pos est le vecteur de déplacement depuis la position initiale du clic
             delta_pos = current_mouse_pos - self.mouse_press_pos
 
-            # Récupérer la MainWindow pour potentiellement mettre à jour les contrôles
-            # Cette partie peut être optimisée si la référence est stockée, ou si on utilise des signaux
             main_window = None
             if self.scene():
-                view_widget = self.scene().parent() # Devrait être CanvasView
+                view_widget = self.scene().parent()
                 if view_widget and hasattr(view_widget, 'parent') and isinstance(view_widget.parent(), MainWindow):
                     main_window = view_widget.parent()
 
-            if self.current_manipulation_mode == 'scale':
-                # Mouvement vertical de la souris pour l'échelle
-                # delta_y négatif = souris vers le haut = diminuer l'échelle
-                # delta_y positif = souris vers le bas = augmenter l'échelle
-                # Sensibilité : facteur par pixel de mouvement vertical
-                scale_sensitivity = 0.001 # Ajustez cette valeur pour la sensibilité
-                scale_change = -delta_pos.y() * scale_sensitivity
+            # Déterminer la sensibilité en fonction du mode précis de la MainWindow
+            is_precise_mouse_mode = False
+            if main_window and hasattr(main_window, 'is_precise_mode'):
+                is_precise_mouse_mode = main_window.is_precise_mode
+                # print(f"[DEBUG] Mouse precise mode: {is_precise_mouse_mode}") # Pour débogage
 
+            if self.current_manipulation_mode == 'scale':
+                if is_precise_mouse_mode:
+                    scale_sensitivity = 0.0001 # Sensibilité précise
+                else:
+                    scale_sensitivity = 0.0005 # Sensibilité rapide
+                # print(f"[DEBUG] Scale sensitivity: {scale_sensitivity}") # Pour débogage
+
+
+                scale_change = -delta_pos.y() * scale_sensitivity
                 new_scale = self.mouse_press_item_scale + scale_change
-                new_scale = max(0.05, new_scale) # Empêcher une échelle nulle ou négative, ou trop petite
+                new_scale = max(0.05, new_scale)
                 self.setScale(new_scale)
 
-                # Mise à jour optionnelle des contrôles de la MainWindow en temps réel
                 if main_window and hasattr(main_window, '_on_item_manipulated'):
-                    main_window._on_item_manipulated(self)
+                    main_window._on_item_manipulated(self) # Mise à jour des spinbox (si souhaité en temps réel)
 
                 event.accept()
-                return # Important: nous avons géré l'événement
+                return
 
             elif self.current_manipulation_mode == 'rotate':
-                # Mouvement horizontal de la souris pour la rotation
-                # delta_x positif = souris vers la droite = rotation horaire (augmenter l'angle)
-                # delta_x négatif = souris vers la gauche = rotation anti-horaire (diminuer l'angle)
-                # Sensibilité : facteur par pixel de mouvement horizontal
-                rotation_sensitivity = 0.1  # degrés par pixel, ajustez cette valeur
-                angle_change = delta_pos.x() * rotation_sensitivity
+                center_point = self.mapToScene(self.transformOriginPoint()) # Point central de l'item dans la scène
 
-                new_rotation = self.mouse_press_item_rotation + angle_change
-                # self.setRotation(new_rotation % 360) # Pour garder entre 0-359
-                self.setRotation(new_rotation) # QGraphicsItem gère bien les angles > 360 ou < 0
+                # Vecteur initial depuis le centre vers la position de pression de la souris
+                vec_initial = self.mouse_press_pos - center_point
+                # Vecteur actuel depuis le centre vers la position actuelle de la souris
+                vec_current = current_mouse_pos - center_point
 
-                # Mise à jour optionnelle des contrôles de la MainWindow en temps réel
+                # Angle de chaque vecteur par rapport à l'horizontale (atan2 donne de -pi à pi)
+                angle_initial_rad = np.arctan2(vec_initial.y(), vec_initial.x())
+                angle_current_rad = np.arctan2(vec_current.y(), vec_current.x())
+
+                # Différence d'angle en radians
+                delta_angle_rad = angle_current_rad - angle_initial_rad
+
+                # Convertir en degrés
+                delta_angle_deg = np.degrees(delta_angle_rad)
+
+                # Appliquer à la rotation initiale de l'item
+                new_rotation = self.mouse_press_item_rotation + delta_angle_deg
+
+                # Ici, la "sensibilité" est intrinsèque à la distance du curseur au centre.
+                # Si vous voulez toujours un facteur de sensibilité global :
+                # sensitivity_factor = 0.5 # Si 1.0, rotation directe. < 1.0 pour plus lent.
+                # new_rotation = self.mouse_press_item_rotation + (delta_angle_deg * sensitivity_factor)
+
+                self.setRotation(new_rotation)
+
                 if main_window and hasattr(main_window, '_on_item_manipulated'):
-                    main_window._on_item_manipulated(self)
+                    main_window._on_item_manipulated(self) # Mise à jour des spinbox (si souhaité en temps réel)
 
                 event.accept()
-                return # Important: nous avons géré l'événement
+                return
 
-        # Si current_manipulation_mode n'est pas 'scale' ou 'rotate',
-        # ou si le bouton gauche n'est pas enfoncé,
-        # laisser QGraphicsItem gérer le mouvement (pour ItemIsMovable).
         super().mouseMoveEvent(event)
 
-    # Dans DraggableResizablePixmapItem
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
         if self.current_manipulation_mode:
             mode_was = self.current_manipulation_mode
@@ -618,9 +632,11 @@ class MainWindow(QMainWindow):
         self.update_controls_state()
 
     def _on_precise_mode_changed(self, state):
-        self.is_precise_mode = state == Qt.CheckState.Checked.value # Qt6
+        self.is_precise_mode = state == Qt.CheckState.Checked.value # Pour Qt6
+        # Ou pour Qt5/compatibilité: self.is_precise_mode = state == Qt.Checked
         mode_str = "Précis" if self.is_precise_mode else "Rapide"
         self.status_bar.showMessage(f"Mode de réglage: {mode_str}", 2000)
+        print(f"[DEBUG] MainWindow: Mode précis activé: {self.is_precise_mode}") # Pour vérifier
 
     def _on_rotation_changed(self, value):
         if self.active_item and not self.rotation_spinbox.signalsBlocked():
